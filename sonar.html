@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Sonar</title>
+<style>
+  :root{
+    --bg:#0a1315;
+    --panel:#0f1d20;
+    --line:#22383c;
+    --ink:#dde9e7;
+    --dim:#759395;
+    --amber:#e0a94a;
+    --teal:#3fa8a2;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;background:var(--bg);color:var(--ink);
+    font-family:"Inter","Helvetica Neue",Arial,sans-serif;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:820px;margin:0 auto;padding:16px 14px 36px}
+
+  header{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;
+    border-bottom:1px solid var(--line);padding-bottom:11px;margin-bottom:14px}
+  h1{font-size:18px;font-weight:600;margin:0;letter-spacing:-.01em}
+  .sub{font-size:12.5px;color:var(--dim)}
+
+  button{font:inherit;cursor:pointer;border-radius:2px;border:1px solid var(--line);
+    background:transparent;color:var(--dim);padding:8px 13px;font-size:13px;
+    transition:color .12s,border-color .12s,background .12s}
+  button:focus-visible{outline:2px solid var(--amber);outline-offset:2px}
+  button[aria-pressed="true"]{color:#0a1315;background:var(--amber);border-color:var(--amber)}
+
+  #start{width:100%;padding:15px;font-size:15px;font-weight:600;
+    color:#0a1315;background:var(--amber);border-color:var(--amber);margin-bottom:14px}
+  #start.on{color:var(--dim);background:transparent;border-color:var(--line);font-weight:400}
+
+  .rows{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px}
+  .group{display:flex;gap:6px}
+
+  .stage{background:var(--panel);border:1px solid var(--line);border-radius:3px;
+    padding:11px 12px;margin-bottom:12px}
+  .stage h2{font-size:12px;font-weight:600;color:var(--dim);margin:0 0 9px;
+    display:flex;justify-content:space-between;align-items:baseline;gap:10px}
+  .stage h2 em{font-style:normal;font-family:ui-monospace,Menlo,monospace;
+    font-size:11px;color:#5c7a7c}
+  canvas{display:block;width:100%;border-radius:2px}
+
+  #hits{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:12.5px;
+    line-height:2;margin:0;color:var(--dim);min-height:82px}
+  #hits b{color:var(--ink);font-weight:600}
+  #hits .bar{display:inline-block;height:4px;background:var(--teal);
+    vertical-align:middle;margin-left:8px;border-radius:2px}
+
+  label.vol{display:flex;align-items:center;gap:10px;font-size:12.5px;color:var(--dim);
+    margin-bottom:12px}
+  input[type=range]{flex:1;accent-color:var(--amber);min-width:120px}
+
+  #status{font-size:12.5px;color:var(--dim);line-height:1.6;margin:0 0 12px}
+  #status.warn{color:var(--amber)}
+  footer{color:#547073;font-size:12px;line-height:1.65;margin-top:18px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1>Sonar</h1>
+    <span class="sub">luidspreker zendt, microfoon luistert</span>
+  </header>
+
+  <button id="start">Meting starten</button>
+  <p id="status">De browser vraagt toegang tot de microfoon. Alles blijft op je telefoon.</p>
+
+  <div class="rows">
+    <div class="group">
+      <button id="bandHigh" aria-pressed="true">Onhoorbaar</button>
+      <button id="bandLow" aria-pressed="false">Hoorbaar</button>
+    </div>
+    <div class="group">
+      <button id="modeEcho" aria-pressed="true">Echo's</button>
+      <button id="modeMove" aria-pressed="false">Beweging</button>
+    </div>
+    <button id="reset">Nulmeting</button>
+  </div>
+
+  <label class="vol">Zendvermogen
+    <input type="range" id="vol" min="0" max="100" value="55">
+    <span id="volv" style="font-family:ui-monospace,Menlo,monospace">55</span>
+  </label>
+
+  <div class="stage">
+    <h2>Echo per afstand <em id="scanInfo">—</em></h2>
+    <canvas id="ascan" height="150"></canvas>
+  </div>
+
+  <div class="stage">
+    <h2>Verloop over tijd <em>nieuwste bovenaan</em></h2>
+    <canvas id="fall" height="230"></canvas>
+  </div>
+
+  <div class="stage">
+    <h2>Sterkste reflecties</h2>
+    <p id="hits">Nog geen meting.</p>
+  </div>
+
+  <footer>
+    Richt de telefoon op een muur en beweeg langzaam naar voren en achteren: de piek
+    schuift mee. Harde, vlakke oppervlakken reflecteren goed, banken en gordijnen slikken
+    het signaal. De onhoorbare stand zit rond 16–20 kHz; katten en jonge kinderen horen dat
+    wel degelijk.
+  </footer>
+</div>
+
+<script>
+"use strict";
+
+/* ---------------- FFT ---------------- */
+class FFT {
+  constructor(n){
+    this.n = n;
+    this.cos = new Float32Array(n/2);
+    this.sin = new Float32Array(n/2);
+    for (let i=0;i<n/2;i++){
+      this.cos[i] = Math.cos(-2*Math.PI*i/n);
+      this.sin[i] = Math.sin(-2*Math.PI*i/n);
+    }
+    this.rev = new Uint32Array(n);
+    let bits = Math.log2(n);
+    for (let i=0;i<n;i++){
+      let r = 0;
+      for (let b=0;b<bits;b++) if (i & (1<<b)) r |= 1 << (bits-1-b);
+      this.rev[i] = r;
+    }
+  }
+  transform(re, im){
+    const n = this.n, rev = this.rev;
+    for (let i=0;i<n;i++){
+      const j = rev[i];
+      if (j > i){
+        let t = re[i]; re[i] = re[j]; re[j] = t;
+        t = im[i]; im[i] = im[j]; im[j] = t;
+      }
+    }
+    for (let len=2; len<=n; len<<=1){
+      const half = len>>1, stride = n/len;
+      for (let i=0;i<n;i+=len){
+        for (let j=0,k=0;j<half;j++,k+=stride){
+          const wr = this.cos[k], wi = this.sin[k];
+          const a = i+j, b = a+half;
+          const xr = re[b]*wr - im[b]*wi;
+          const xi = re[b]*wi + im[b]*wr;
+          re[b] = re[a] - xr; im[b] = im[a] - xi;
+          re[a] += xr;        im[a] += xi;
+        }
+      }
+    }
+  }
+  inverse(re, im){
+    const n = this.n;
+    for (let i=0;i<n;i++) im[i] = -im[i];
+    this.transform(re, im);
+    for (let i=0;i<n;i++){ re[i] /= n; im[i] = -im[i]/n; }
+  }
+}
+
+/* ---------------- staat ---------------- */
+const C = 343;                 // m/s
+const MAX_RANGE = 6;           // meter
+let band = 'high';
+let mode = 'echo';
+
+let ctxAudio = null, stream = null, running = false;
+let fs = 48000, pulseLen = 4096, chirpLen = 512, N = 16384;
+let fft = null, Hre = null, Him = null;
+let xre = null, xim = null;
+let ring = null, ringPos = 0, sinceFrame = 0;
+let maxLag = 0, env = null, bg = null, agc = 1e-6;
+let rows = [], ROWS = 200, COLS = 300;
+
+const $ = id => document.getElementById(id);
+const statusEl = $('status');
+
+/* ---------------- chirp ---------------- */
+function bandEdges(){
+  const nyq = fs/2;
+  if (band === 'high'){
+    const hi = Math.min(20500, nyq - 800);
+    return [Math.max(14000, hi - 5000), hi];
+  }
+  return [5000, 11000];
+}
+
+function buildTemplates(){
+  const [f0, f1] = bandEdges();
+  chirpLen = Math.round(fs * 0.011);
+  const k = (f1 - f0) / (chirpLen / fs);
+
+  // reëel signaal voor de luidspreker
+  const out = new Float32Array(pulseLen);
+  // analytisch signaal als matched filter
+  Hre = new Float32Array(N);
+  Him = new Float32Array(N);
+
+  for (let n=0;n<chirpLen;n++){
+    const t = n / fs;
+    const ph = 2*Math.PI*(f0*t + 0.5*k*t*t);
+    const w = 0.5 - 0.5*Math.cos(2*Math.PI*n/(chirpLen-1));   // Hann
+    out[n] = w * Math.cos(ph);
+    Hre[n] = w * Math.cos(ph);
+    Him[n] = w * Math.sin(ph);
+  }
+  fft.transform(Hre, Him);
+  return out;
+}
+
+/* ---------------- start / stop ---------------- */
+$('start').onclick = () => running ? stop() : start();
+
+async function start(){
+  try {
+    statusEl.className = '';
+    statusEl.textContent = 'Microfoon aanvragen…';
+
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio:{
+        echoCancellation:false, noiseSuppression:false, autoGainControl:false,
+        googEchoCancellation:false, googNoiseSuppression:false, googAutoGainControl:false,
+        channelCount:1
+      }
+    });
+
+    ctxAudio = new (window.AudioContext || window.webkitAudioContext)();
+    await ctxAudio.resume();
+    fs = ctxAudio.sampleRate;
+
+    pulseLen = 1 << Math.round(Math.log2(fs * 0.085));   // ~85 ms
+    N = pulseLen * 4;
+    fft = new FFT(N);
+    maxLag = Math.min(Math.round(2*MAX_RANGE/C*fs), pulseLen - chirpLen - 8);
+
+    xre = new Float32Array(N); xim = new Float32Array(N);
+    ring = new Float32Array(pulseLen*2);
+    ringPos = 0; sinceFrame = 0;
+    env = new Float32Array(maxLag); bg = null; agc = 1e-6;
+    rows = [];
+
+    const chirp = buildTemplates();
+    maxLag = Math.min(maxLag, pulseLen - chirpLen - 8);
+    env = new Float32Array(maxLag);
+
+    // zender: buffer van één pulseperiode, loopt door
+    const buf = ctxAudio.createBuffer(1, pulseLen, fs);
+    buf.copyToChannel(chirp, 0);
+    const src = ctxAudio.createBufferSource();
+    src.buffer = buf; src.loop = true;
+    const gain = ctxAudio.createGain();
+    gain.gain.value = +$('vol').value / 100 * 0.5;
+    src.connect(gain).connect(ctxAudio.destination);
+    src.start();
+    window._src = src; window._gain = gain;
+
+    // ontvanger
+    const mic = ctxAudio.createMediaStreamSource(stream);
+    const proc = ctxAudio.createScriptProcessor(2048, 1, 1);
+    proc.onaudioprocess = e => {
+      const d = e.inputBuffer.getChannelData(0);
+      for (let i=0;i<d.length;i++){
+        ring[ringPos] = d[i];
+        ringPos = (ringPos + 1) % ring.length;
+      }
+      sinceFrame += d.length;
+      if (sinceFrame >= pulseLen){ sinceFrame = 0; process(); }
+    };
+    const sink = ctxAudio.createGain();
+    sink.gain.value = 0;
+    mic.connect(proc).connect(sink).connect(ctxAudio.destination);
+    window._proc = proc;
+
+    running = true;
+    $('start').textContent = 'Stoppen';
+    $('start').classList.add('on');
+    const [f0,f1] = bandEdges();
+    statusEl.textContent =
+      `${(fs/1000).toFixed(1)} kHz · chirp ${(f0/1000).toFixed(1)}–${(f1/1000).toFixed(1)} kHz · ` +
+      `resolutie ${(C/(2*(f1-f0))*100).toFixed(1)} cm · bereik ${(maxLag/fs*C/2).toFixed(1)} m`;
+    requestAnimationFrame(draw);
+
+  } catch (err){
+    statusEl.className = 'warn';
+    statusEl.textContent = 'Geen toegang tot de microfoon. Controleer de rechten en of de pagina via https draait.';
+  }
+}
+
+function stop(){
+  running = false;
+  try { window._src.stop(); } catch(e){}
+  try { window._proc.disconnect(); } catch(e){}
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  if (ctxAudio) ctxAudio.close();
+  $('start').textContent = 'Meting starten';
+  $('start').classList.remove('on');
+  statusEl.textContent = 'Gestopt.';
+}
+
+/* ---------------- verwerking ---------------- */
+function process(){
+  // laatste 2 pulseperiodes uitlezen: daar zit gegarandeerd één hele chirp in
+  const L = ring.length;
+  xre.fill(0); xim.fill(0);
+  for (let i=0;i<L;i++) xre[i] = ring[(ringPos + i) % L];
+
+  fft.transform(xre, xim);
+  // R = X · conj(H)
+  for (let i=0;i<N;i++){
+    const ar = xre[i], ai = xim[i];
+    const br = Hre[i], bi = -Him[i];
+    xre[i] = ar*br - ai*bi;
+    xim[i] = ar*bi + ai*br;
+  }
+  fft.inverse(xre, xim);
+
+  // directe koppeling luidspreker → microfoon is de sterkste piek: dat is nul meter
+  let d0 = 0, best = -1;
+  const searchEnd = L - maxLag - 4;
+  for (let i=0;i<searchEnd;i++){
+    const m = xre[i]*xre[i] + xim[i]*xim[i];
+    if (m > best){ best = m; d0 = i; }
+  }
+  if (best <= 0) return;
+
+  let peak = 0;
+  for (let i=0;i<maxLag;i++){
+    const j = d0 + i;
+    const v = Math.hypot(xre[j], xim[j]);
+    env[i] = v;
+    if (i > chirpLen*0.5 && v > peak) peak = v;
+  }
+
+  agc = Math.max(peak, agc * 0.985, 1e-7);
+
+  if (!bg) bg = Float32Array.from(env);
+  else for (let i=0;i<maxLag;i++) bg[i] += (env[i] - bg[i]) * 0.02;
+
+  const row = new Float32Array(COLS);
+  const per = maxLag / COLS;
+  for (let c=0;c<COLS;c++){
+    let m = 0;
+    const a = Math.floor(c*per), b = Math.max(a+1, Math.floor((c+1)*per));
+    for (let i=a;i<b && i<maxLag;i++){
+      const v = mode === 'move' ? Math.abs(env[i] - bg[i]) : env[i];
+      if (v > m) m = v;
+    }
+    row[c] = Math.min(1, m / agc * (mode === 'move' ? 3.2 : 1));
+  }
+  rows.unshift(row);
+  if (rows.length > ROWS) rows.pop();
+}
+
+/* ---------------- tekenen ---------------- */
+const ascan = $('ascan'), actx = ascan.getContext('2d');
+const fall  = $('fall'),  fctx = fall.getContext('2d');
+const off = document.createElement('canvas');
+off.width = COLS; off.height = ROWS;
+const octx = off.getContext('2d');
+const img = octx.createImageData(COLS, ROWS);
+
+function colormap(v, out, o){
+  // zwart → diepgroen → turkoois → amber → licht
+  v = Math.max(0, Math.min(1, v));
+  const stops = [
+    [0.00,  10, 19, 21],
+    [0.28,  16, 66, 70],
+    [0.55,  63,168,162],
+    [0.80, 224,169, 74],
+    [1.00, 255,244,222]
+  ];
+  let i = 0;
+  while (i < stops.length-2 && v > stops[i+1][0]) i++;
+  const a = stops[i], b = stops[i+1];
+  const t = (v - a[0]) / (b[0] - a[0]);
+  out[o]   = a[1] + (b[1]-a[1])*t;
+  out[o+1] = a[2] + (b[2]-a[2])*t;
+  out[o+2] = a[3] + (b[3]-a[3])*t;
+  out[o+3] = 255;
+}
+
+function draw(){
+  if (!running) return;
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+
+  /* --- A-scan --- */
+  const w = ascan.clientWidth, h = 150;
+  ascan.width = w*dpr; ascan.height = h*dpr;
+  actx.setTransform(dpr,0,0,dpr,0,0);
+  actx.clearRect(0,0,w,h);
+
+  const range = maxLag / fs * C / 2;
+  actx.strokeStyle = '#1b2f32'; actx.fillStyle = '#5c7a7c';
+  actx.font = '10px ui-monospace, Menlo, monospace';
+  actx.lineWidth = 1;
+  for (let m=1; m<=Math.floor(range); m++){
+    const x = m/range * w;
+    actx.beginPath(); actx.moveTo(x,0); actx.lineTo(x,h-14); actx.stroke();
+    actx.fillText(m + ' m', x+3, h-3);
+  }
+
+  if (rows.length){
+    const r = rows[0];
+    actx.beginPath();
+    actx.moveTo(0, h-14);
+    for (let c=0;c<COLS;c++){
+      actx.lineTo(c/(COLS-1)*w, (h-14) - r[c]*(h-24));
+    }
+    actx.lineTo(w, h-14); actx.closePath();
+    actx.fillStyle = mode === 'move' ? 'rgba(224,169,74,.16)' : 'rgba(63,168,162,.16)';
+    actx.fill();
+
+    actx.beginPath();
+    for (let c=0;c<COLS;c++){
+      const x = c/(COLS-1)*w, y = (h-14) - r[c]*(h-24);
+      c ? actx.lineTo(x,y) : actx.moveTo(x,y);
+    }
+    actx.strokeStyle = mode === 'move' ? '#e0a94a' : '#3fa8a2';
+    actx.lineWidth = 1.6; actx.stroke();
+  }
+  $('scanInfo').textContent = mode === 'move' ? 'afwijking t.o.v. nulmeting' : 'ruwe reflectie';
+
+  /* --- waterfall --- */
+  const d = img.data;
+  for (let y=0;y<ROWS;y++){
+    const r = rows[y];
+    for (let x=0;x<COLS;x++) colormap(r ? r[x] : 0, d, (y*COLS+x)*4);
+  }
+  octx.putImageData(img, 0, 0);
+  const fw = fall.clientWidth, fh = 230;
+  fall.width = fw*dpr; fall.height = fh*dpr;
+  fctx.setTransform(dpr,0,0,dpr,0,0);
+  fctx.imageSmoothingEnabled = true;
+  fctx.drawImage(off, 0, 0, fw, fh);
+
+  /* --- pieken --- */
+  if (rows.length){
+    const r = rows[0], found = [];
+    for (let c=2;c<COLS-2;c++){
+      if (r[c] > 0.22 && r[c] >= r[c-1] && r[c] > r[c+1] && r[c] >= r[c-2] && r[c] > r[c+2]){
+        found.push([c/COLS * range, r[c]]);
+      }
+    }
+    found.sort((a,b) => b[1]-a[1]);
+    $('hits').innerHTML = found.length
+      ? found.slice(0,4).map(([m,v]) =>
+          `<b>${m.toFixed(2)} m</b> <span class="bar" style="width:${(v*120).toFixed(0)}px"></span>`
+        ).join('<br>')
+      : 'Geen duidelijke reflectie. Zet het zendvermogen hoger of kies de hoorbare stand.';
+  }
+
+  requestAnimationFrame(draw);
+}
+
+/* ---------------- bediening ---------------- */
+function pair(aId, bId, cb){
+  const a = $(aId), b = $(bId);
+  const set = which => {
+    a.setAttribute('aria-pressed', String(which === 'a'));
+    b.setAttribute('aria-pressed', String(which === 'b'));
+    cb(which);
+  };
+  a.onclick = () => set('a');
+  b.onclick = () => set('b');
+}
+pair('bandHigh','bandLow', w => {
+  band = w === 'a' ? 'high' : 'low';
+  if (running){ stop(); setTimeout(start, 250); }
+});
+pair('modeEcho','modeMove', w => { mode = w === 'a' ? 'echo' : 'move'; rows = []; });
+
+$('reset').onclick = () => { bg = null; rows = []; };
+$('vol').oninput = e => {
+  $('volv').textContent = e.target.value;
+  if (window._gain) window._gain.gain.value = e.target.value / 100 * 0.5;
+};
+</script>
+</body>
+</html>
